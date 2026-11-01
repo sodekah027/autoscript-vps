@@ -858,10 +858,17 @@ F2BCFG
 
         BORE_BIN="/usr/local/bin/bore"
         SERVICE_FILE="/etc/systemd/system/bore-server.service"
-        BORE_VERSION="v0.5.0"
+        BORE_VERSION="v0.6.0"
 
         # Dapatkan IP Public VPS
         VPS_IP=$(curl -4s https://api.ipify.org 2>/dev/null || curl -4s https://ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')
+
+        # Deteksi domain jika ada SSL cert di VPS, jika tidak gunakan IP
+        DETECTED_DOMAIN=""
+        if [ -f "/var/lib/marzban/xray.crt" ]; then
+            DETECTED_DOMAIN=$(openssl x509 -in /var/lib/marzban/xray.crt -noout -subject 2>/dev/null | grep -oP '(?<=CN = )[^,\s]+' || true)
+        fi
+        DISPLAY_HOST="${DETECTED_DOMAIN:-$VPS_IP}"
 
         # Dapatkan setting port & secret saat ini jika service sudah ada
         CURRENT_PORT="7835"
@@ -875,42 +882,74 @@ F2BCFG
 
         echo ""
         echo "Pilih opsi Bore:"
-        echo "1) Cek Status & Port Tunnel Aktif"
+        echo "1) Cek Status & Info Koneksi Termius (IP & Port Aktif)"
         echo "2) Install / Konfigurasi Bore Server (Port & Secret)"
         echo "3) Generate Script Oneliner Client (Termux & Linux)"
-        echo "4) Restart Service Bore Server"
-        echo "5) Stop / Nonaktifkan Service Bore Server"
-        echo "6) Uninstall Bore Server"
-        echo "7) Kembali ke Menu Utama"
-        read -rp "Pilih opsi (1-7, default: 1): " BORE_OPT
+        echo "4) Buka Port Tunnel di Firewall (UFW)"
+        echo "5) Restart Service Bore Server"
+        echo "6) Stop / Nonaktifkan Service Bore Server"
+        echo "7) Uninstall Bore Server"
+        echo "8) Kembali ke Menu Utama"
+        read -rp "Pilih opsi (1-8, default: 1): " BORE_OPT
         BORE_OPT=${BORE_OPT:-1}
 
         case "$BORE_OPT" in
             1)
                 echo ""
-                echo "--- Status Bore Server ---"
+                echo "============================================="
+                echo "       STATUS BORE SERVER & TUNNEL AKTIF     "
+                echo "============================================="
                 if systemctl is-active --quiet bore-server 2>/dev/null; then
-                    echo -e "\e[32m✔ Service bore-server: BERJALAN (Active)\e[0m"
+                    echo -e "Status Service   : \e[32m✔ BERJALAN (Active)\e[0m"
                 else
-                    echo -e "\e[33mService bore-server belum berjalan atau tidak terpasang.\e[0m"
+                    echo -e "Status Service   : \e[31m✘ MATI / Belum Terpasang\e[0m"
                 fi
-                echo ""
-                echo "--- Port Listening (Bore) ---"
-                ss -tlnp 2>/dev/null | grep -E "bore|:${CURRENT_PORT}\b" || netstat -tlnp 2>/dev/null | grep -E "bore|:${CURRENT_PORT}\b" || echo "Tidak ada port bore yang aktif."
-                echo ""
-                echo "--- Informasi Konfigurasi Server ---"
                 echo "IP Public Server : $VPS_IP"
+                [ -n "$DETECTED_DOMAIN" ] && echo "Domain Server    : $DETECTED_DOMAIN"
                 echo "Port Kontrol     : $CURRENT_PORT"
                 echo "Secret Key       : $CURRENT_SECRET"
                 echo ""
-                systemctl status bore-server --no-pager 2>/dev/null | head -n 15
+
+                # Deteksi port forwarded yang sedang aktif dibuka oleh bore
+                FORWARDED_PORTS=$(ss -tlnp 2>/dev/null | grep bore | awk '{print $4}' | awk -F':' '{print $NF}' | grep -v "^${CURRENT_PORT}\$" | sort -u)
+
+                echo "---------------------------------------------"
+                echo "📡 STATUS CLIENT TUNNEL TERHUBUNG:"
+                echo "---------------------------------------------"
+                if [ -n "$FORWARDED_PORTS" ]; then
+                    for p in $FORWARDED_PORTS; do
+                        echo -e "\e[32m🟢 Client Terhubung di Port: $p\e[0m"
+                    done
+
+                    echo ""
+                    echo "======================================================="
+                    echo "📱 DATA UNTUK DI-INPUT KE TERMIUS / APLIKASI SSH LAIN:"
+                    echo "======================================================="
+                    for p in $FORWARDED_PORTS; do
+                        echo "  • Host / IP   : $VPS_IP (atau $DISPLAY_HOST)"
+                        echo "  • Port        : $p  <-- (Masukkan angka port ini!)"
+                        echo "  • Username    : <Username Termux Anda, cek: whoami>"
+                        echo "  • Password    : <Password Termux Anda, diset via: passwd>"
+                        echo ""
+                        echo "  Contoh Perintah Terminal / Linux / Mac:"
+                        echo "  ssh -p $p <user_termux>@$VPS_IP"
+                        echo "-------------------------------------------------------"
+                    done
+                else
+                    echo -e "\e[33m⚪ Belum ada client (Termux/PC) yang terhubung.\e[0m"
+                    echo "Jalankan runner di Termux: ~/.bore_runner_vps.sh"
+                    echo "atau generate script client melalui menu no. 3."
+                fi
+                echo "======================================================="
+                echo ""
+                systemctl status bore-server --no-pager 2>/dev/null | head -n 12
                 ;;
             2)
                 echo ""
                 echo "--- Instalasi / Konfigurasi Bore Server ---"
 
-                # Cek & install binary bore jika belum ada
-                if ! command -v bore &>/dev/null && [ ! -f "$BORE_BIN" ]; then
+                # Cek & install binary bore v0.6.0
+                if ! command -v bore &>/dev/null || [ ! -f "$BORE_BIN" ] || ! "$BORE_BIN" --version 2>&1 | grep -q "$BORE_VERSION"; then
                     echo "Mengunduh binary bore ${BORE_VERSION}..."
                     ARCH=$(uname -m)
                     if [ "$ARCH" = "x86_64" ]; then
@@ -929,7 +968,7 @@ F2BCFG
                         mv "$TMP_DIR/bore" "$BORE_BIN"
                         chmod +x "$BORE_BIN"
                         rm -rf "$TMP_DIR"
-                        echo -e "\e[32m✔ Binary bore berhasil dipasang ke $BORE_BIN\e[0m"
+                        echo -e "\e[32m✔ Binary bore ${BORE_VERSION} berhasil dipasang ke $BORE_BIN\e[0m"
                     else
                         echo -e "\e[31m[ERROR] Gagal mengunduh binary bore dari GitHub.\e[0m"
                         rm -rf "$TMP_DIR"
@@ -969,10 +1008,12 @@ EOF
                 systemctl restart bore-server
                 sleep 1
 
-                # Konfigurasi firewall jika UFW aktif
+                # Konfigurasi firewall UFW agar port tunnel tidak diblokir
                 if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
-                    echo "Membuka port 7835/tcp di firewall UFW..."
+                    echo "Membuka port di firewall UFW (7835, 48923, dan range 40000-50000)..."
                     ufw allow 7835/tcp >/dev/null 2>&1 || true
+                    ufw allow 48923/tcp >/dev/null 2>&1 || true
+                    ufw allow 40000:50000/tcp >/dev/null 2>&1 || true
                 fi
 
                 echo -e "\e[32m✔ Bore Server berhasil dikonfigurasi & dijalankan!\e[0m"
@@ -992,12 +1033,16 @@ EOF
                 CLI_LOCAL_PORT=$(echo "$CLI_LOCAL_PORT" | tr -cd '0-9')
                 [ -z "$CLI_LOCAL_PORT" ] && CLI_LOCAL_PORT="8022"
 
-                read -rp "Ingin menentukan Remote Port tertentu di VPS? (tekan ENTER untuk port acak otomatis): " CLI_REMOTE_PORT
+                read -rp "Ingin menentukan Remote Port tertentu di VPS? [default: 48923]: " CLI_REMOTE_PORT
+                CLI_REMOTE_PORT=${CLI_REMOTE_PORT:-48923}
                 CLI_REMOTE_PORT=$(echo "$CLI_REMOTE_PORT" | tr -cd '0-9')
+                [ -z "$CLI_REMOTE_PORT" ] && CLI_REMOTE_PORT="48923"
 
-                REMOTE_PORT_ARG=""
-                if [ -n "$CLI_REMOTE_PORT" ]; then
-                    REMOTE_PORT_ARG=" --port $CLI_REMOTE_PORT"
+                REMOTE_PORT_ARG=" --port $CLI_REMOTE_PORT"
+
+                # Pastikan remote port diizinkan di UFW jika ada
+                if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+                    ufw allow "${CLI_REMOTE_PORT}/tcp" >/dev/null 2>&1 || true
                 fi
 
                 echo ""
@@ -1056,12 +1101,6 @@ EOF
                     chmod 644 "$WEB_DIR/bore-client.sh"
                 fi
 
-                # Deteksi domain jika ada SSL cert di VPS, jika tidak gunakan IP
-                DETECTED_DOMAIN=""
-                if [ -f "/var/lib/marzban/xray.crt" ]; then
-                    DETECTED_DOMAIN=$(openssl x509 -in /var/lib/marzban/xray.crt -noout -subject 2>/dev/null | grep -oP '(?<=CN = )[^,\s]+' || true)
-                fi
-
                 if [ -n "$DETECTED_DOMAIN" ]; then
                     CLIENT_SCRIPT_URL="https://$DETECTED_DOMAIN/bore-client.sh"
                 else
@@ -1073,16 +1112,32 @@ EOF
                 echo ""
                 echo -e "\e[32mcurl -fsSL $CLIENT_SCRIPT_URL -o ~/.bore_runner_vps.sh && chmod +x ~/.bore_runner_vps.sh && nohup ~/.bore_runner_vps.sh > ~/bore_vps.log 2>&1 &\e[0m"
                 echo ""
-                echo "Atau jalankan langsung interaktif di terminal Termux:"
-                echo -e "\e[33mcurl -fsSL $CLIENT_SCRIPT_URL | bash\e[0m"
-                echo ""
 
-                echo -e "\e[36m=== 3. ONELINER UNTUK LINUX / VPS LAIN (x86_64 / arm64) ===\e[0m"
-                echo "Jalankan di server/client Linux tujuan:"
-                echo -e "\e[32mcurl -fsSL https://github.com/ekzhang/bore/releases/download/v0.5.0/bore-v0.5.0-x86_64-unknown-linux-musl.tar.gz | tar -xz -C /usr/local/bin && chmod +x /usr/local/bin/bore && bore local $CLI_LOCAL_PORT --to $VPS_IP --secret \"$CURRENT_SECRET\"$REMOTE_PORT_ARG\e[0m"
+                echo "======================================================="
+                echo "📱 PANDUAN KONEKSI DI TERMIUS / SSH APP LAIN:"
+                echo "======================================================="
+                echo "Buka Termius -> Tambah Host Baru (+):"
+                echo "  • Label    : Termux via VPS Bore"
+                echo "  • Hostname : $VPS_IP (atau $DISPLAY_HOST)"
+                echo "  • Port     : $CLI_REMOTE_PORT"
+                echo "  • Username : (Username Termux Anda, ketik 'whoami' di Termux)"
+                echo "  • Password : (Password Termux Anda, dibuat lewat 'passwd')"
+                echo "======================================================="
                 echo ""
                 ;;
             4)
+                echo "Membuka port-port Bore di Firewall (UFW)..."
+                if command -v ufw &>/dev/null; then
+                    ufw allow 7835/tcp
+                    ufw allow 48923/tcp
+                    ufw allow 40000:50000/tcp
+                    echo -e "\e[32m✔ Port 7835, 48923, dan range 40000-50000/tcp telah dibuka di UFW.\e[0m"
+                    ufw status | grep -E "7835|48923|40000"
+                else
+                    echo "UFW tidak terpasang di VPS ini."
+                fi
+                ;;
+            5)
                 echo "Merestart service bore-server..."
                 systemctl restart bore-server
                 sleep 1
@@ -1092,13 +1147,13 @@ EOF
                     echo -e "\e[31m[ERROR] Gagal merestart service bore-server!\e[0m"
                 fi
                 ;;
-            5)
+            6)
                 echo "Menghentikan service bore-server..."
                 systemctl stop bore-server
                 systemctl disable bore-server 2>/dev/null || true
                 echo -e "\e[33m✔ Service bore-server telah dihentikan & dinonaktifkan.\e[0m"
                 ;;
-            6)
+            7)
                 echo "Menghapus instalasi bore server..."
                 read -rp "Yakin ingin menghapus bore server? [y/N]: " UNCONFIRM
                 if [[ "$UNCONFIRM" =~ ^[Yy]$ ]]; then
